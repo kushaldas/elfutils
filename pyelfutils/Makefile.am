@@ -1,7 +1,6 @@
 ## Process this file with automake to create Makefile.in
-## Configure input file for elfutils.
 ##
-## Copyright (C) 1996-2002, 2003, 2004, 2005, 2006, 2008, 2009 Red Hat, Inc.
+## Copyright (C) 1996-2010 Red Hat, Inc.
 ## This file is part of Red Hat elfutils.
 ##
 ## Red Hat elfutils is free software; you can redistribute it and/or modify
@@ -25,29 +24,40 @@
 ## Network licensing program, please visit www.openinventionnetwork.com
 ## <http://www.openinventionnetwork.com>.
 ##
-ACLOCAL_AMFLAGS = -I m4
+include $(top_srcdir)/config/eu.am
+AM_CFLAGS += -pthread -fno-strict-aliasing -O2 -g -pipe -Wall -Wp,-D_FORTIFY_SOURCE=2 -fexceptions -fstack-protector --param=ssp-buffer-size=4 -mtune=generic -D_GNU_SOURCE -fPIC -fwrapv -DNDEBUG \
+	    -I$(srcdir)/../libelf -I$(srcdir)/../libebl \
+	    -I$(srcdir)/../libdw -I$(srcdir)/../libdwfl -I$(top_srcdir)/lib \
+	    -I$(srcdir)/../libasm -I/usr/include/python2.7 -I$(top_srcdir)
+VERSION = 1
 
-pkginclude_HEADERS = version.h
+if BUILD_STATIC
+libasm = ../libasm/libasm.a
+libdw = ../libdw/libdw.a $(zip_LIBS) $(libelf) $(libebl) -ldl
+libelf = ../libelf/libelf.a
+else
+libasm = ../libasm/libasm.so
+libdw = ../libdw/libdw.so
+libelf = ../libelf/libelf.so
+endif
+libebl = ../libebl/libebl.a
+libeu = ../lib/libeu.a
 
-# Add doc back when we have some real content.
-SUBDIRS = config m4 lib libelf libebl libdwfl libdw libcpu libasm backends \
-	  src pyelfutils po tests
+all: elfutils.so
 
-EXTRA_DIST = elfutils.spec GPG-KEY NOTES EXCEPTION
+elfutils_so_LDLIBS = $(libdw)  $(libelf) $(libmudflap) -ldl -lpython2.7 
 
-# Make sure the test install uses lib64 when $LIB will yield lib64.
-# Make sure the test build uses the same compiler, which on e.g. ppc64
-# determines which platform we are actually testing.
-DISTCHECK_CONFIGURE_FLAGS = \
-	--libdir=`echo $(libdir) | sed "s,^$(exec_prefix),$$dc_install_base,"`\
-	CC="$(CC)"
+elfutils.o:elfutils.c
+	$(CC) -o $@ -c $(AM_CFLAGS) $^
 
-distcheck-hook:
-	chmod -R u+w $(distdir)
+elfutils.so: elfutils.o
+	$(CC) -o $@ -shared $(elfutils_so_LDLIBS) elfutils.o $(libebl) $(libeu) 
 
-rpm: dist
-	rpmbuild -ts --sign elfutils-@PACKAGE_VERSION@.tar.bz2
+install: install-am elfutils.so
+	$(mkinstalldirs) $(DESTDIR)$(libdir)
+	$(INSTALL_PROGRAM) elfutils.so $(DESTDIR)$(libdir)/elfutils.so
 
-# Tell version 3.79 and up of GNU make to not build goals in this
-# directory in parallel.
-.NOTPARALLEL:
+uninstall: uninstall-am
+	rm -f $(DESTDIR)$(libdir)/elfutils.so
+
+CLEANFILES += $(am_elfutils_pic_a_OBJECTS) elfutils.so

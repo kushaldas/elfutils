@@ -233,6 +233,9 @@ dnl Test suite.
 AM_CONDITIONAL(STANDALONE, false)dnl Used in tests/Makefile.am, which see.
 AC_CONFIG_FILES([tests/Makefile])
 
+dnl Python library
+AC_CONFIG_FILES([pyelfutils/Makefile])
+
 # Get the definitions necessary to create the Makefiles in the po
 # subdirectories.  This is a small subset of the gettext rules.
 AC_SUBST(USE_NLS, yes)
