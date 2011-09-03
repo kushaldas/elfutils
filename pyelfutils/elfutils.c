@@ -145,6 +145,12 @@ process_elf_file (Dwfl_Module *dwflmod, int fd)
       return Py_None;
     }
 
+  /* Determine the number of sections.  */
+  if (unlikely (elf_getshdrnum (ebl->elf, &shnum) < 0))
+    error (EXIT_FAILURE, 0,
+           gettext ("cannot determine number of sections: %s"),
+           elf_errmsg (-1));
+
   /* Determine the number of phdrs. */
   if (unlikely (elf_getphdrnum (ebl->elf, &phnum) < 0))
     error (EXIT_FAILURE, 0,
@@ -566,8 +572,11 @@ handle_symtab (Ebl *ebl, Elf_Scn *scn, GElf_Shdr *shdr)
       PyObject *pyvis = PyString_FromString(get_visibility_type (GELF_ST_VISIBILITY (sym->st_other)));
       PyDict_SetItem(resultdict, PyString_FromString("vis"), pyvis);
 
-      PyObject *pyndx = PyString_FromString(ebl_section_name (ebl, sym->st_shndx, xndx, scnbuf,
+      sprintf(magic,"%s",ebl_section_name (ebl, sym->st_shndx, xndx, scnbuf,
 				sizeof (scnbuf), NULL, shnum));
+      PyObject *pyndx = PyString_FromString(gettext(magic));
+      memset (magic , '\0', 280);
+
       PyDict_SetItem(resultdict, PyString_FromString("ndx"), pyndx);
 
       PyObject *pyname = PyString_FromString(elf_strptr (ebl->elf, shdr->sh_link, sym->st_name));
