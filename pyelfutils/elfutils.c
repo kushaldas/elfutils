@@ -36,12 +36,15 @@
 #endif
 
 /* Numbers of sections and program headers in the file.  */
+static size_t shnum;
 static size_t phnum;
 
 /* Declarations of local functions.  */
 static PyObject * process_file (int fd, const char *fname, bool only_one);
 static PyObject * process_elf_file (Dwfl_Module *dwflmod, int fd);
 static PyObject * print_ehdr (Ebl *ebl, GElf_Ehdr *ehdr);
+static PyObject * print_symtab (Ebl *ebl, int type);
+static PyObject * handle_symtab (Ebl *ebl, Elf_Scn *scn, GElf_Shdr *shdr);
 
 
 static int
@@ -118,7 +121,7 @@ print_file_type (unsigned short int e_type)
 PyObject *
 process_elf_file (Dwfl_Module *dwflmod, int fd)
 {
-  PyObject *data = NULL;
+  PyObject *result = PyDict_New();
   GElf_Addr dwflbias;
   Elf *elf = dwfl_module_getelf (dwflmod, &dwflbias);
 
@@ -175,8 +178,13 @@ process_elf_file (Dwfl_Module *dwflmod, int fd)
         goto ebl_error;
     }
 
-  data = print_ehdr (ebl, ehdr);
+  PyObject *pyheader = print_ehdr (ebl, ehdr);
+  PyDict_SetItem(result, PyString_FromString("header"), pyheader);
 
+  PyObject *pysymtab = print_symtab (ebl, SHT_DYNSYM);
+  PyDict_SetItem(result, PyString_FromString("dynsym"), pysymtab);
+  if (pysymtab == NULL)
+      printf("Getting NULL systab");
   ebl_closebackend (ebl);
 
   if (pure_ebl != ebl)
@@ -185,7 +193,7 @@ process_elf_file (Dwfl_Module *dwflmod, int fd)
       elf_end (pure_elf);
     }
 
-  return data;
+  return result;
 
 }
 
@@ -372,6 +380,323 @@ print_ehdr (Ebl *ebl, GElf_Ehdr *ehdr)
   PyDict_SetItem(resultdict, PyString_FromString("stringheaderindex"), pystrhdr);
 
   return resultdict;
+}
+
+static const char *
+get_visibility_type (int value)
+{
+  switch (value)
+    {    
+    case STV_DEFAULT:
+      return "DEFAULT";
+    case STV_INTERNAL:
+      return "INTERNAL";
+    case STV_HIDDEN:
+      return "HIDDEN";
+    case STV_PROTECTED:
+      return "PROTECTED";
+    default:
+      return "???";
+    }    
+}
+
+/* Print the program header.  */
+PyObject *
+print_symtab (Ebl *ebl, int type)
+{
+  /* Find the symbol table(s).  For this we have to search through the
+     section table.  */
+  Elf_Scn *scn = NULL;
+
+  while ((scn = elf_nextscn (ebl->elf, scn)) != NULL)
+    {
+      /* Handle the section if it is a symbol table.  */
+      GElf_Shdr shdr_mem;
+      GElf_Shdr *shdr = gelf_getshdr (scn, &shdr_mem);
+
+      if (shdr != NULL && shdr->sh_type == (GElf_Word) type)
+	return handle_symtab (ebl, scn, shdr);
+    }
+    printf("We are here\n");
+    Py_INCREF(Py_None);
+    return Py_None;
+}
+
+
+PyObject *
+handle_symtab (Ebl *ebl, Elf_Scn *scn, GElf_Shdr *shdr)
+{
+
+  PyObject *result = PyList_New(0);
+  Elf_Data *versym_data = NULL;
+  Elf_Data *verneed_data = NULL;
+  Elf_Data *verdef_data = NULL;
+  Elf_Data *xndx_data = NULL;
+  int class = gelf_getclass (ebl->elf);
+  Elf32_Word verneed_stridx = 0;
+  Elf32_Word verdef_stridx = 0;
+
+  /* Get the data of the section.  */
+  Elf_Data *data = elf_getdata (scn, NULL);
+  if (data == NULL) {
+    Py_INCREF(Py_None);
+    return Py_None;
+  }
+
+  /* Find out whether we have other sections we might need.  */
+  Elf_Scn *runscn = NULL;
+  while ((runscn = elf_nextscn (ebl->elf, runscn)) != NULL)
+    {
+      GElf_Shdr runshdr_mem;
+      GElf_Shdr *runshdr = gelf_getshdr (runscn, &runshdr_mem);
+
+      if (likely (runshdr != NULL))
+	{
+	  if (runshdr->sh_type == SHT_GNU_versym
+	      && runshdr->sh_link == elf_ndxscn (scn))
+	    /* Bingo, found the version information.  Now get the data.  */
+	    versym_data = elf_getdata (runscn, NULL);
+	  else if (runshdr->sh_type == SHT_GNU_verneed)
+	    {
+	      /* This is the information about the needed versions.  */
+	      verneed_data = elf_getdata (runscn, NULL);
+	      verneed_stridx = runshdr->sh_link;
+	    }
+	  else if (runshdr->sh_type == SHT_GNU_verdef)
+	    {
+	      /* This is the information about the defined versions.  */
+	      verdef_data = elf_getdata (runscn, NULL);
+	      verdef_stridx = runshdr->sh_link;
+	    }
+	  else if (runshdr->sh_type == SHT_SYMTAB_SHNDX
+	      && runshdr->sh_link == elf_ndxscn (scn))
+	    /* Extended section index.  */
+	    xndx_data = elf_getdata (runscn, NULL);
+	}
+    }
+
+  /* Get the section header string table index.  */
+  size_t shstrndx;
+  if (unlikely (elf_getshdrstrndx (ebl->elf, &shstrndx) < 0))
+    error (EXIT_FAILURE, 0,
+	   gettext ("cannot get section header string table index"));
+
+  /* Now we can compute the number of entries in the section.  */
+  unsigned int nsyms = data->d_size / (class == ELFCLASS32
+				       ? sizeof (Elf32_Sym)
+				       : sizeof (Elf64_Sym));
+
+  /*
+  printf (ngettext ("\nSymbol table [%2u] '%s' contains %u entry:\n",
+		    "\nSymbol table [%2u] '%s' contains %u entries:\n",
+		    nsyms),
+	  (unsigned int) elf_ndxscn (scn),
+	  elf_strptr (ebl->elf, shstrndx, shdr->sh_name), nsyms);
+  GElf_Shdr glink;
+  printf (ngettext (" %lu local symbol  String table: [%2u] '%s'\n",
+		    " %lu local symbols  String table: [%2u] '%s'\n",
+		    shdr->sh_info),
+	  (unsigned long int) shdr->sh_info,
+	  (unsigned int) shdr->sh_link,
+	  elf_strptr (ebl->elf, shstrndx,
+		      gelf_getshdr (elf_getscn (ebl->elf, shdr->sh_link),
+				    &glink)->sh_name));
+
+  fputs_unlocked (class == ELFCLASS32
+		  ? gettext ("\
+  Num:    Value   Size Type    Bind   Vis          Ndx Name\n")
+		  : gettext ("\
+  Num:            Value   Size Type    Bind   Vis          Ndx Name\n"),
+		  stdout);*/
+
+  for (unsigned int cnt = 0; cnt < nsyms; ++cnt)
+    {
+      PyObject *resultdict = PyDict_New();
+      char magic[280];
+      memset (magic , '\0', 280);
+      char typebuf[64];
+      char bindbuf[64];
+      char scnbuf[64];
+      Elf32_Word xndx;
+      GElf_Sym sym_mem;
+      GElf_Sym *sym = gelf_getsymshndx (data, xndx_data, cnt, &sym_mem, &xndx);
+
+      if (unlikely (sym == NULL))
+	continue;
+
+      /* Determine the real section index.  */
+      if (likely (sym->st_shndx != SHN_XINDEX))
+	xndx = sym->st_shndx;
+      /*
+      printf (gettext ("\
+%5u: %0*" PRIx64 " %6" PRId64 " %-7s %-6s %-9s %6s %s"),
+	      cnt,
+	      class == ELFCLASS32 ? 8 : 16,
+	      sym->st_value,
+	      sym->st_size,
+	      ebl_symbol_type_name (ebl, GELF_ST_TYPE (sym->st_info),
+				    typebuf, sizeof (typebuf)),
+	      ebl_symbol_binding_name (ebl, GELF_ST_BIND (sym->st_info),
+				       bindbuf, sizeof (bindbuf)),
+	      get_visibility_type (GELF_ST_VISIBILITY (sym->st_other)),
+	      ebl_section_name (ebl, sym->st_shndx, xndx, scnbuf,
+				sizeof (scnbuf), NULL, shnum),
+	      elf_strptr (ebl->elf, shdr->sh_link, sym->st_name));
+      */
+      /*
+      sprintf ("%0*" PRIx64, sym->st_value);
+      PyObject *pyvalue = PyString_FromString(magic);
+      PyDict_SetItem(resultdict, PyString_FromString("value"), pyvalue);
+
+
+      memset (magic , '\0', 280);
+      sprintf ("%6" PRId64, sym->st_size);
+      PyObject *pysize = PyString_FromString(sym->magic);
+      PyDict_SetItem(resultdict, PyString_FromString("size"), pysize);
+      memset (magic , '\0', 280);
+      */
+      PyObject *pytype = PyString_FromString(ebl_symbol_type_name (ebl, GELF_ST_TYPE (sym->st_info),
+				    typebuf, sizeof (typebuf)));
+      PyDict_SetItem(resultdict, PyString_FromString("type"), pytype);
+
+      PyObject *pybind = PyString_FromString(ebl_symbol_binding_name (ebl, GELF_ST_BIND (sym->st_info),
+				       bindbuf, sizeof (bindbuf)));
+      PyDict_SetItem(resultdict, PyString_FromString("bind"), pybind);
+
+      PyObject *pyvis = PyString_FromString(get_visibility_type (GELF_ST_VISIBILITY (sym->st_other)));
+      PyDict_SetItem(resultdict, PyString_FromString("vis"), pyvis);
+
+      PyObject *pyndx = PyString_FromString(ebl_section_name (ebl, sym->st_shndx, xndx, scnbuf,
+				sizeof (scnbuf), NULL, shnum));
+      PyDict_SetItem(resultdict, PyString_FromString("ndx"), pyndx);
+
+      PyObject *pyname = PyString_FromString(elf_strptr (ebl->elf, shdr->sh_link, sym->st_name));
+      PyDict_SetItem(resultdict, PyString_FromString("name"), pyname);
+
+
+      if (versym_data != NULL)
+	{
+	  /* Get the version information.  */
+	  GElf_Versym versym_mem;
+	  GElf_Versym *versym = gelf_getversym (versym_data, cnt, &versym_mem);
+
+	  if (versym != NULL && ((*versym & 0x8000) != 0 || *versym > 1))
+	    {
+	      bool is_nobits = false;
+	      bool check_def = xndx != SHN_UNDEF;
+
+	      if (xndx < SHN_LORESERVE || sym->st_shndx == SHN_XINDEX)
+		{
+		  GElf_Shdr symshdr_mem;
+		  GElf_Shdr *symshdr =
+		    gelf_getshdr (elf_getscn (ebl->elf, xndx), &symshdr_mem);
+
+		  is_nobits = (symshdr != NULL
+			       && symshdr->sh_type == SHT_NOBITS);
+		}
+
+	      if (is_nobits || ! check_def)
+		{
+		  /* We must test both.  */
+		  GElf_Vernaux vernaux_mem;
+		  GElf_Vernaux *vernaux = NULL;
+		  size_t vn_offset = 0;
+
+		  GElf_Verneed verneed_mem;
+		  GElf_Verneed *verneed = gelf_getverneed (verneed_data, 0,
+							   &verneed_mem);
+		  while (verneed != NULL)
+		    {
+		      size_t vna_offset = vn_offset;
+
+		      vernaux = gelf_getvernaux (verneed_data,
+						 vna_offset += verneed->vn_aux,
+						 &vernaux_mem);
+		      while (vernaux != NULL
+			     && vernaux->vna_other != *versym
+			     && vernaux->vna_next != 0)
+			{
+			  /* Update the offset.  */
+			  vna_offset += vernaux->vna_next;
+
+			  vernaux = (vernaux->vna_next == 0
+				     ? NULL
+				     : gelf_getvernaux (verneed_data,
+							vna_offset,
+							&vernaux_mem));
+			}
+
+		      /* Check whether we found the version.  */
+		      if (vernaux != NULL && vernaux->vna_other == *versym)
+			/* Found it.  */
+			break;
+
+		      vn_offset += verneed->vn_next;
+		      verneed = (verneed->vn_next == 0
+				 ? NULL
+				 : gelf_getverneed (verneed_data, vn_offset,
+						    &verneed_mem));
+		    }
+
+		  if (vernaux != NULL && vernaux->vna_other == *versym)
+		    {
+		      sprintf (magic, "@%s (%u)",
+			      elf_strptr (ebl->elf, verneed_stridx,
+					  vernaux->vna_name),
+			      (unsigned int) vernaux->vna_other);
+		      check_def = 0;
+		    }
+		  else if (unlikely (! is_nobits))
+		    error (0, 0, gettext ("bad dynamic symbol"));
+		  else
+		    check_def = 1;
+		}
+
+	      if (check_def && *versym != 0x8001)
+		{
+		  /* We must test both.  */
+		  size_t vd_offset = 0;
+
+		  GElf_Verdef verdef_mem;
+		  GElf_Verdef *verdef = gelf_getverdef (verdef_data, 0,
+							&verdef_mem);
+		  while (verdef != NULL)
+		    {
+		      if (verdef->vd_ndx == (*versym & 0x7fff))
+			/* Found the definition.  */
+			break;
+
+		      vd_offset += verdef->vd_next;
+		      verdef = (verdef->vd_next == 0
+				? NULL
+				: gelf_getverdef (verdef_data, vd_offset,
+						  &verdef_mem));
+		    }
+
+		  if (verdef != NULL)
+		    {
+		      GElf_Verdaux verdaux_mem;
+		      GElf_Verdaux *verdaux
+			= gelf_getverdaux (verdef_data,
+					   vd_offset + verdef->vd_aux,
+					   &verdaux_mem);
+
+		      if (verdaux != NULL)
+			sprintf (magic, (*versym & 0x8000) ? "@%s" : "@@%s",
+				elf_strptr (ebl->elf, verdef_stridx,
+					    verdaux->vda_name));
+		    }
+		}
+	    }
+        PyObject *pysymver = PyString_FromString(magic);
+        PyDict_SetItem(resultdict, PyString_FromString("symbolversion"), pysymver);
+
+        PyList_Append(result,resultdict);
+	}
+
+      /*putchar_unlocked ('\n');*/
+    }
+    return result;
 }
 
 static int
