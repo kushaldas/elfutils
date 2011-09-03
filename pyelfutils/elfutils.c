@@ -433,6 +433,9 @@ process_file (int fd, const char *fname, bool only_one)
         error (0, 0, "failed reading '%s': %s",
                fname, dwfl_errmsg (-1));
       close (dwfl_fd);          /* Consumed on success, not on failure.  */
+      dwfl_end (dwfl);
+      Py_INCREF(Py_None);
+      return Py_None;
     } else
     {
       dwfl_report_end (dwfl, NULL, NULL);
