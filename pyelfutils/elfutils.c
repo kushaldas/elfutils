@@ -187,8 +187,10 @@ process_elf_file (Dwfl_Module *dwflmod, int fd)
   PyObject *pyheader = print_ehdr (ebl, ehdr);
   PyDict_SetItem(result, PyString_FromString("header"), pyheader);
 
-  PyObject *pysymtab = print_symtab (ebl, SHT_DYNSYM);
-  PyDict_SetItem(result, PyString_FromString("dynsym"), pysymtab);
+  PyObject *pydynsym = print_symtab (ebl, SHT_DYNSYM);
+  PyDict_SetItem(result, PyString_FromString("dynsym"), pydynsym);
+  PyObject *pysymtab = print_symtab (ebl, SHT_SYMTAB);
+  PyDict_SetItem(result, PyString_FromString("symtab"), pysymtab);
   if (pysymtab == NULL)
       printf("Getting NULL systab");
   ebl_closebackend (ebl);
@@ -423,7 +425,6 @@ print_symtab (Ebl *ebl, int type)
       if (shdr != NULL && shdr->sh_type == (GElf_Word) type)
 	return handle_symtab (ebl, scn, shdr);
     }
-    printf("We are here\n");
     Py_INCREF(Py_None);
     return Py_None;
 }
@@ -561,6 +562,12 @@ handle_symtab (Ebl *ebl, Elf_Scn *scn, GElf_Shdr *shdr)
       PyDict_SetItem(resultdict, PyString_FromString("size"), pysize);
       memset (magic , '\0', 280);
       */
+
+      memset (magic , '\0', 280);
+      sprintf(magic, "%u", cnt);
+      PyObject *pycnt = PyString_FromString(magic);
+      PyDict_SetItem(resultdict, PyString_FromString("cnt"), pycnt);
+
       PyObject *pytype = PyString_FromString(ebl_symbol_type_name (ebl, GELF_ST_TYPE (sym->st_info),
 				    typebuf, sizeof (typebuf)));
       PyDict_SetItem(resultdict, PyString_FromString("type"), pytype);
@@ -700,8 +707,8 @@ handle_symtab (Ebl *ebl, Elf_Scn *scn, GElf_Shdr *shdr)
         PyObject *pysymver = PyString_FromString(magic);
         PyDict_SetItem(resultdict, PyString_FromString("symbolversion"), pysymver);
 
-        PyList_Append(result,resultdict);
 	}
+        PyList_Append(result,resultdict);
 
       /*putchar_unlocked ('\n');*/
     }
