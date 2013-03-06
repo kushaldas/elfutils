@@ -43,6 +43,7 @@ static size_t phnum;
 static PyObject * process_file (int fd, const char *fname, bool only_one);
 static PyObject * process_elf_file (Dwfl_Module *dwflmod, int fd);
 static PyObject * print_ehdr (Ebl *ebl, GElf_Ehdr *ehdr);
+static PyObject * print_shdr (Ebl *ebl, GElf_Ehdr *ehdr);
 static PyObject * print_symtab (Ebl *ebl, int type);
 static PyObject * handle_symtab (Ebl *ebl, Elf_Scn *scn, GElf_Shdr *shdr);
 
@@ -186,6 +187,9 @@ process_elf_file (Dwfl_Module *dwflmod, int fd)
 
   PyObject *pyheader = print_ehdr (ebl, ehdr);
   PyDict_SetItem(result, PyString_FromString("header"), pyheader);
+
+  PyObject *pysecheader = print_shdr (pure_ebl, ehdr);
+  PyDict_SetItem(result, PyString_FromString("sectionheader"), pysecheader);
 
   PyObject *pydynsym = print_symtab (ebl, SHT_DYNSYM);
   PyDict_SetItem(result, PyString_FromString("dynsym"), pydynsym);
@@ -389,6 +393,120 @@ print_ehdr (Ebl *ebl, GElf_Ehdr *ehdr)
 
   return resultdict;
 }
+
+/* Print the section headers.  */
+static PyObject *
+print_shdr (Ebl *ebl, GElf_Ehdr *ehdr)
+{
+  size_t cnt; 
+  size_t shstrndx;
+  PyObject *result = PyList_New(0);
+
+  /*if (! print_file_header)
+    printf (gettext ("\
+There are %d section headers, starting at offset %#" PRIx64 ":\n\
+\n"),
+            ehdr->e_shnum, ehdr->e_shoff);
+
+   Get the section header string table index.  */
+  if (unlikely (elf_getshdrstrndx (ebl->elf, &shstrndx) < 0))
+    error (EXIT_FAILURE, 0,
+           gettext ("cannot get section header string table index"));
+  /*
+  puts (gettext ("Section Headers:"));
+
+  if (ehdr->e_ident[EI_CLASS] == ELFCLASS32)
+    puts (gettext ("[Nr] Name                 Type         Addr     Off    Size   ES Flags Lk Inf Al"));
+  else 
+    puts (gettext ("[Nr] Name                 Type         Addr             Off      Size     ES Flags Lk Inf Al"));
+  */
+  for (cnt = 0; cnt < shnum; ++cnt)
+    {    
+      Elf_Scn *scn = elf_getscn (ebl->elf, cnt);
+
+      if (unlikely (scn == NULL))
+        error (EXIT_FAILURE, 0, gettext ("cannot get section: %s"),
+               elf_errmsg (-1));
+      /* Get the section header.  */
+      GElf_Shdr shdr_mem;
+      GElf_Shdr *shdr = gelf_getshdr (scn, &shdr_mem);
+      if (unlikely (shdr == NULL))
+        error (EXIT_FAILURE, 0, gettext ("cannot get section header: %s"),
+               elf_errmsg (-1));
+
+      char flagbuf[20];
+      char *cp = flagbuf;
+      if (shdr->sh_flags & SHF_WRITE)
+        *cp++ = 'W';
+      if (shdr->sh_flags & SHF_ALLOC)
+        *cp++ = 'A';
+      if (shdr->sh_flags & SHF_EXECINSTR)
+        *cp++ = 'X';
+      if (shdr->sh_flags & SHF_MERGE)
+        *cp++ = 'M';
+      if (shdr->sh_flags & SHF_STRINGS)
+        *cp++ = 'S';
+      if (shdr->sh_flags & SHF_INFO_LINK)
+        *cp++ = 'I';
+      if (shdr->sh_flags & SHF_LINK_ORDER)
+        *cp++ = 'L';
+      if (shdr->sh_flags & SHF_OS_NONCONFORMING)
+        *cp++ = 'N';
+      if (shdr->sh_flags & SHF_GROUP)
+        *cp++ = 'G';
+      if (shdr->sh_flags & SHF_TLS)
+        *cp++ = 'T';
+      if (shdr->sh_flags & SHF_ORDERED)
+        *cp++ = 'O';
+      if (shdr->sh_flags & SHF_EXCLUDE)
+        *cp++ = 'E';
+      *cp = '\0';
+
+      char buf[128];
+      PyObject *res = PyList_New(0);
+      char magic[80];
+      memset (magic , '\0', 80);
+      /*printf ("[%2zu] %-20s %-12s %0*" PRIx64 " %0*" PRIx64 " %0*" PRIx64
+              " %2" PRId64 " %-5s %2" PRId32 " %3" PRId32
+              " %2" PRId64 "\n",
+              cnt,
+              elf_strptr (ebl->elf, shstrndx, shdr->sh_name)
+              ?: "<corrupt>",
+              ebl_section_type_name (ebl, shdr->sh_type, buf, sizeof (buf)),
+              ehdr->e_ident[EI_CLASS] == ELFCLASS32 ? 8 : 16, shdr->sh_addr,
+              ehdr->e_ident[EI_CLASS] == ELFCLASS32 ? 6 : 8, shdr->sh_offset,
+              ehdr->e_ident[EI_CLASS] == ELFCLASS32 ? 6 : 8, shdr->sh_size,
+              shdr->sh_entsize, flagbuf, shdr->sh_link, shdr->sh_info,
+              shdr->sh_addralign);*/
+
+      sprintf (magic, "%2zu", cnt);
+      PyObject *pycnt = PyString_FromString (magic);
+
+      memset (magic, '\0', 80);
+      sprintf (magic, "%s", elf_strptr (ebl->elf, shstrndx, shdr->sh_name)?: "<corrupt>");
+      PyObject *pyname = PyString_FromString (magic);
+
+      memset (magic, '\0', 80);
+      sprintf (magic, "%s", ebl_section_type_name (ebl, shdr->sh_type, buf, sizeof (buf)));
+      PyObject *pytype = PyString_FromString (magic);
+
+      memset (magic, '\0', 80);
+      sprintf (magic, "%0*" PRIx64, ehdr->e_ident[EI_CLASS] == ELFCLASS32 ? 8 : 16, shdr->sh_addr);
+      PyObject *pyaddress = PyString_FromString (magic);
+
+      PyList_Append (res, pycnt);
+      PyList_Append (res, pyname);
+      PyList_Append (res, pytype);
+      PyList_Append (res, pyaddress);
+
+      PyList_Append (result, res);
+
+    }
+
+  /*fputc_unlocked ('\n', stdout);*/
+  return result;
+}
+
 
 static const char *
 get_visibility_type (int value)
@@ -827,7 +945,7 @@ elfutils_parseelf(PyObject *self, PyObject *args)
 
 static PyMethodDef ElfUtilsMethods[] = {
     {"parseelf",  elfutils_parseelf, METH_VARARGS,
-     "Does some magic"},
+     "Parses the ELF"},
     /*{"pythoncall",  kabireport_pythoncall, METH_VARARGS,
      "pass the python functions here"},*/
     {NULL, NULL, 0, NULL}        /* Sentinel */
